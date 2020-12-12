@@ -1,0 +1,205 @@
+---
+title: "625.661 Statistical Models and Regression - Course Project"
+author: "Jacob M. Lundeen"
+date: "2020/12/13"
+output: 
+  pdf_document:
+    fig_caption: yes
+    includes:
+      in_header: my_header.tex
+    df_print: default
+geometry: margin = 0.5in
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, fig.width = 10, fig.height = 6)
+
+library(ggplot2)
+library(tidyverse)
+library(nflfastR)
+library(gridExtra)
+library(olsrr)
+library(kableExtra)
+library(jtools)
+library(broom)
+library(ggstance)
+
+set_summ_defaults(digits = 5, confint = TRUE, vifs = TRUE)
+```
+
+```{r, echo=FALSE, cache=TRUE}
+seasons <- 2010:2019
+df <- map_df(seasons, function(x) {
+  readRDS(
+    url(
+      paste0("https://raw.githubusercontent.com/guga31bb/nflfastR-data/master/data/play_by_play_",x,".rds")
+    )
+  )
+})
+```
+
+# Overview
+
+This is the final course project for 625.661 Statistical Models and Regression for Fall 2020. The purpose is to put all the skills we have developed over the semester on display. To complete this project, I will be using the dataset 'nflfastR', developed by Mr. Ben Baldwin. This dataset contains all play by play information for the National Football League back to 1999. I will be using data from the year 2010 till 2019. My project will look to answer the question of which variables are most strongly correlated with Expected Points Added (EPA).
+
+## Background
+
+Expected Points can trace their origin all the way back to the 1960's with a quarterback named Virgil Carter. Mr. Carter played for the Hall of Fame coach Bill Walsh with the Cincinnati Bengals and obtained a master's degree in statistics from Northwestern while playing. Mr. Carter and his professor, Robert Machol, published a paper studying more than 8,000 plays from the 1969 season and calculated the expected point values from various field positions. Mr. Brian Burke of Advanced Football Analytics brought EP into the modern era in the early 2000's ([Inside the Pylon](http://insidethepylon.com/football-101/glossary-football-101/2019/10/25/glossary-entry-expected-points-added/#:~:text=Brian%20Burke%20of%20Advanced%20Football,sadly%2C%20no%20longer%20active)).
+
+So what exactly is EP? By Mr. Burke's own words:
+
+>Football is a sport of strategy and decision making. But before we can compare the potential risks and rewards of various options, we need to be able to properly measure the value of possible outcomes.
+
+>The value of a football play has traditionally been measured in yards gained. Unfortunately, yards is a flawed measure because not all yards are equal. For example, a 4-yard gain on 3rd down and 3 is much more valuable than a 4-yard gain on 3rd and 8. Any measure of success must consider the down and distance situation.
+
+>Field position is also an important consideration. Yards gained near the goal line are tougher to come by and are more valuable than yards gained at midfield. Yards lost near one’s own goal line can be more costly as well.
+
+>We can measure the values of situations and, by extension, the outcomes of plays by establishing an equivalence in terms of points. To do this we can start by looking back through recent NFL history at the ‘next points scored’ for all plays. For example, if we look at all 1st and 10s from an offense’ own 20-yard line, the team on offense will score next slightly more often than its opponent. If we add up all the ‘next points’ scored for and against the offense’s team, whether on the current drive or subsequent drives, we can estimate the net point advantage an offense can expect for any football situation. For a 1st and 10 at an offense’s own 20, it’s +0.4 net points, and at the opponent’s 20, it’s +4.0 net points. These net point values are called Expected Points (EP), and every down-distance-field position situation has a corresponding EP value. ([EP](https://www.advancedfootballanalytics.com/index.php/home/stats/stats-explained/expected-points-and-epa-explained))
+
+EPA is simply the difference in EP at the beginning of the play and the EP at the end of the play.
+
+## Plan
+
+As stated in the Overview, I want to look at which variables are most correlated with EP, and which variables might be used as predictive of EP. I will be developing two models, one for passing plays and one for rushing plays. The reason is because of interceptions. Interceptions are important plays, but they clearly only happen on passing plays, whereas fumbles can happen on any type of play.
+
+I will first go through the exploratory analysis, showing the variables I will be keeping from the full dataset and any sort of additional data preparation I will need to do.
+
+Then I will fit the full models, conducting a full analysis of each one. Once completed, I will use the Ordinary Least Squares (OLS) Backwards and Stepwise regression model selection techniques. After I have decided on the appropriate final models, I will see if either of them provide any predictive value.
+
+# Exploratory Analysis and Data Preparation
+
+We start off with our exploratory analysis to get a feel for what we are working with. Lets look at the dimensions and structure of the data.
+
+```{r, echo=FALSE}
+dim(df)
+glimpse(df[1:10])
+```
+
+We see that we are working with 482,734 observations across 340 variables. First, we want to filter out observations that are not relevant to the analysis. I want only run or pass plays with no penalties, sacks, QB kneels or QB spikes. 
+
+```{r, echo=FALSE}
+df2 <- df %>%
+  filter(rush == 1 | pass == 1 & penalty == 0 & play_deleted == 0 & qb_kneel == 0 & qb_spike == 0) %>%
+  select(everything()) %>%
+  mutate(interception = replace_na(interception, 2), fumble = replace_na(fumble, 2), fumble_lost = replace_na(fumble_lost, 2))
+
+dim(df2)
+```
+
+We are now at 306,358 observations after filtering.
+
+A quick look at some central tendency statistics: for passing we see the average EPA at 0.86 over 102,909 plays.
+
+```{r, echo=FALSE}
+df2 %>%
+  filter(pass == 1 & complete_pass == 1 & !is.na(epa)) %>%
+  summarize(epa = mean(epa), plays=n())
+```
+
+For rushing, we see an average EPA of -0.1 over 134,502 plays.
+
+```{r, echo=FALSE}
+df2 %>%
+  filter(rush == 1 & !is.na(epa)) %>%
+  summarize(epa = mean(epa), plays = n())
+```
+
+To anyone who might not have any previous experience with EPA, this might seem strange. These initial findings are saying the average running play adds negative EP! But this falls in line with what we know, passing is more valuable than rushing.
+
+# Model Building
+
+Now to build the models. The first model will use only variables that are likely related to EPA: 'yards_gained', 'yards_after_catch', 'air_yards', 'interception', 'fumble', 'fumble_lost', 'yardline_100', 'ydstogo', and 'ydsnet'. The model for rushing will not include interceptions as you cannot have an interception on a run.
+
+## Passing Model
+
+To get the model to work, we had to do some re-coding of the dataset. I was having an issue between 'yards_after_catch' (YAC) and 'interceptions'. When 'interception == 1', YAC == NA. And since the model drops any NAs, the only value left in interception was 0, so I was getting a "contrast" error because interception only had one factor level. With that cleaned up, I could continue.
+
+```{r, echo=FALSE}
+Pdf <- df2 %>%
+  filter(pass == 1) %>%
+  mutate(yards_after_catch = replace_na(yards_after_catch, 0), air_yards = replace_na(air_yards, 0))
+  
+Pfit <- lm(epa ~ yards_after_catch + air_yards + as.factor(interception) + as.factor(fumble) + as.factor(fumble_lost) + yardline_100 + ydstogo + ydsnet, data = Pdf)
+
+summ(Pfit)
+```
+
+None of the confidence intervals (CI) include zero, the p-values are all extremely small, and the Variable Inflation Factor (VIFs) show that there is no concern for multicollinearity. The $R^2_{adj}$ however is not good. At 0.55, this would indicate that I am missing some data.
+
+### Plots
+
+```{r, echo=FALSE, fig.align='center'}
+plot(Pfit)
+```
+
+The residual versus fitted plot does not display normal behavior and might require a transformation to either the response or to one of the regressors. The normal plot tells us that the tails of the distribution are too light to be normal and we might have some outliers. I wanted to see how the plots looked for the residuals versus each of my regressors. In in the interest of saving space, I will only show three of the plots.
+
+```{r, echo=FALSE, fig.align='center', fig.cap="Residuals versus Passing Air Yards", cache=TRUE}
+plot(Pfit$model$air_yards, Pfit$residuals, xlab="Passing Air Yards", ylab="Model Residuals")
+```
+
+```{r, echo=FALSE, fig.align='center', fig.cap="Residuals versus Yards After Catch", cache=TRUE}
+plot(Pfit$model$yards_after_catch, Pfit$residuals, xlab="Yards After Catch", ylab="Model Residuals")
+```
+
+```{r, echo=FALSE, fig.align='center', fig.cap="Residuals versus Yardline 100", cache=TRUE}
+plot(Pfit$model$yardline_100, Pfit$residuals, xlab = "Yardline 100", ylab = "Model Residuals")
+```
+
+Figure 1 is interesting. It shows normality except for a split that happens at x > 40 and y = 0. This is most likely explained because the farther the ball travels in the air, the more variance there is in whether the ball will be caught, dropped or intercepted.
+
+Figure 2 is indicative of the plots for "yards_after_catch" and "ydstogo". This pattern generally shows that the variance is not constant, indicating Var($\epsilon$) increases as *y* decreases. 
+
+Figure 3 is similar for both "yardline_100" and "ydsnet" which shows constant variance and no inadequacies.
+
+After attempting multiple different types of transformations, I could not get a better fitting model. I also used OLS Backwards Regression and Stepwise Regression model selections, and neither process paired the model down. So it looks like my passing model is finished.
+
+Below are the regression plots for each regressor variable.
+
+```{r, echo=FALSE, fig.align='center', warning=FALSE, fig.cap="EPA versus Pass Model Regressors", cache=TRUE}
+b <- ggplot(Pdf, aes(y=epa, x = yards_after_catch)) + geom_point() + theme_bw() + geom_smooth(method = "lm", formula = y ~ x)
+c <- ggplot(Pdf, aes(y=epa, x = air_yards)) + geom_point() + theme_bw() + geom_smooth(method = "lm", formula = y ~ x)
+d <- ggplot(Pdf, aes(y=epa, x = ydsnet)) + geom_point() + theme_bw() + geom_smooth(method = "lm", formula = y ~ x)
+e <- ggplot(Pdf, aes(y=epa, x = yardline_100)) + geom_point() + theme_bw() + geom_smooth(method = "lm", formula = y ~ x)
+f <- ggplot(Pdf, aes(y=epa, x = ydstogo)) + geom_point() + theme_bw() + geom_smooth(method = "lm", formula = y ~ x)
+
+grid.arrange(b, c, d, e, f, nrow=3, ncol = 2)
+```
+
+## Rushing Model
+
+Now it is time to work on the rushing model. We will follow the same steps as with the passing model.
+
+```{r, echo=FALSE}
+Rdf <- df2 %>%
+  filter(rush == 1)
+
+Rfit <- lm(epa ~ yards_gained + as.factor(fumble) + as.factor(fumble_lost) + yardline_100 + ydstogo + ydsnet, data = Rdf)
+
+summ(Rfit)
+```
+
+While we do not seem to have any issues with perfectly collinear variables this time, the p-values, just like the passing model, are essentially zero and our $R^2_{adj}$ is not great. The VIFs look good, so there is no issue with multicollinearity. Now I can check the residual plots.
+
+```{r, echo=FALSE}
+plot(Rfit)
+```
+
+Oddly enough, the residual and normal plots are closely similar to the plots from the passing model. The same goes for the residual versus individual regressor plots (in the interest of space, I will not include those), 'ydsnet' and 'yardline_100' indicate normal variance, whereas the rest indicate non-normal variance.
+
+As with the passing model, none of the transformations I attempted improved the model. The same happened when I utilized the OLS model selection processes, none of the regressors were removed from the model. Below are the regressor plots.
+
+```{r, echo=FALSE, warning=FALSE, fig.cap="EPA versus Run Model Regressors", fig.pos='H', fig.align='center', cache=TRUE}
+a <- ggplot(Rdf, aes(y=epa, x = yards_gained)) + geom_point() + theme_bw() + geom_smooth(method = "lm", formula = y ~ x)
+b <- ggplot(Rdf, aes(y=epa, x = ydsnet)) + geom_point() + theme_bw() + geom_smooth(method = "lm", formula = y ~ x)
+c <- ggplot(Rdf, aes(y=epa, x = yardline_100)) + geom_point() + theme_bw() + geom_smooth(method = "lm", formula = y ~ x)
+d <- ggplot(Rdf, aes(y=epa, x = ydstogo)) + geom_point() + theme_bw() + geom_smooth(method = "lm", formula = y ~ x)
+
+grid.arrange(a, b, c, d, nrow=2, ncol = 2)
+```
+
+# Conclusion
+
+Overall, I believe the models are okay, but not great. I think I was missing some variables in the model that would have improved it, but I was not able to determine which ones.
+
+There are two things I would like to explore in the future: fitting a nonlinear model and changing the response variable. I think using those same variables with 'pass_touchdown' and 'rush_touchdown' might provide better models.
